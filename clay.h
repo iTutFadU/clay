@@ -894,6 +894,7 @@ CLAY_DLL_EXPORT Clay_ScrollContainerData Clay_GetScrollContainerData(Clay_Elemen
 // - measureTextFunction is a user provided function that adheres to the interface Clay_Dimensions (Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
 // - userData is a pointer that will be transparently passed through when the measureTextFunction is called.
 CLAY_DLL_EXPORT void Clay_SetMeasureTextFunction(Clay_Dimensions (*measureTextFunction)(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData), void *userData);
+CLAY_DLL_EXPORT void Clay_SetBreakWordFunction(int32_t (*breakWordFunction)(Clay_StringSlice text, float *width, Clay_TextElementConfig *config, void *userData), void *userData);
 // Experimental - Used in cases where Clay needs to integrate with a system that manages its own scrolling containers externally.
 // Please reach out if you plan to use this function, as it may be subject to change.
 CLAY_DLL_EXPORT void Clay_SetQueryScrollOffsetFunction(Clay_Vector2 (*queryScrollOffsetFunction)(uint32_t elementId, void *userData), void *userData);
@@ -998,20 +999,20 @@ typeName *arrayName##Slice_Get(arrayName##Slice *slice, int32_t index) {        
 }                                                                                                               \
                                                                                                                 \
 typeName arrayName##_RemoveSwapback(arrayName *array, int32_t index) {                                          \
-	if (Clay__Array_RangeCheck(index, array->length)) {                                                         \
-		array->length--;                                                                                        \
-		typeName removed = array->internalArray[index];                                                         \
-		array->internalArray[index] = array->internalArray[array->length];                                      \
-		return removed;                                                                                         \
-	}                                                                                                           \
-	return typeName##_DEFAULT;                                                                                  \
+    if (Clay__Array_RangeCheck(index, array->length)) {                                                         \
+        array->length--;                                                                                        \
+        typeName removed = array->internalArray[index];                                                         \
+        array->internalArray[index] = array->internalArray[array->length];                                      \
+        return removed;                                                                                         \
+    }                                                                                                           \
+    return typeName##_DEFAULT;                                                                                  \
 }                                                                                                               \
                                                                                                                 \
 void arrayName##_Set(arrayName *array, int32_t index, typeName value) {                                         \
-	if (Clay__Array_RangeCheck(index, array->capacity)) {                                                       \
-		array->internalArray[index] = value;                                                                    \
-		array->length = index < array->length ? array->length : index + 1;                                      \
-	}                                                                                                           \
+    if (Clay__Array_RangeCheck(index, array->capacity)) {                                                       \
+        array->internalArray[index] = value;                                                                    \
+        array->length = index < array->length ? array->length : index + 1;                                      \
+    }                                                                                                           \
 }                                                                                                               \
 
 #define CLAY__ARRAY_DEFINE(typeName, arrayName)     \
@@ -1247,6 +1248,7 @@ struct Clay_Context {
     uint32_t generation;
     uintptr_t arenaResetOffset;
     void *measureTextUserData;
+    void *breakWordUserData;
     void *queryScrollOffsetUserData;
     Clay_Arena internalArena;
     // Layout Elements / Render Commands
@@ -1313,6 +1315,7 @@ Clay_String Clay__WriteStringToCharBuffer(Clay__charArray *buffer, Clay_String s
     __attribute__((import_module("clay"), import_name("queryScrollOffsetFunction"))) Clay_Vector2 Clay__QueryScrollOffset(uint32_t elementId, void *userData);
 #else
     Clay_Dimensions (*Clay__MeasureText)(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
+    int32_t (*Clay__BreakWord)(Clay_StringSlice text, float *width, Clay_TextElementConfig *config, void *userData);
     Clay_Vector2 (*Clay__QueryScrollOffset)(uint32_t elementId, void *userData);
 #endif
 
@@ -1574,7 +1577,7 @@ Clay__MeasuredWord *Clay__AddMeasuredWord(Clay__MeasuredWord word, Clay__Measure
 Clay__MeasureTextCacheItem *Clay__MeasureTextCached(Clay_String *text, Clay_TextElementConfig *config) {
     Clay_Context* context = Clay_GetCurrentContext();
     #ifndef CLAY_WASM
-    if (!Clay__MeasureText) {
+    if (!Clay__MeasureText || !Clay__BreakWord) {
         if (!context->booleanWarnings.textMeasurementFunctionNotSet) {
             context->booleanWarnings.textMeasurementFunctionNotSet = true;
             context->errorHandler.errorHandlerFunction(CLAY__INIT(Clay_ErrorData) {
@@ -1649,7 +1652,6 @@ Clay__MeasureTextCacheItem *Clay__MeasureTextCached(Clay_String *text, Clay_Text
     float lineWidth = 0;
     float measuredWidth = 0;
     float measuredHeight = 0;
-    float spaceWidth = Clay__MeasureText(CLAY__INIT(Clay_StringSlice) { .length = 1, .chars = CLAY__SPACECHAR.chars, .baseChars = CLAY__SPACECHAR.chars }, config, context->measureTextUserData).width;
     Clay__MeasuredWord tempWord = { .next = -1 };
     Clay__MeasuredWord *previousWord = &tempWord;
     while (end < text->length) {
@@ -1665,7 +1667,7 @@ Clay__MeasureTextCacheItem *Clay__MeasureTextCached(Clay_String *text, Clay_Text
         }
         char current = text->chars[end];
         if (current == ' ' || current == '\n') {
-            int32_t length = end - start;
+            int32_t length = end - start + (current == ' ');
             Clay_Dimensions dimensions = CLAY__DEFAULT_STRUCT;
             if (length > 0) {
                 dimensions = Clay__MeasureText(CLAY__INIT(Clay_StringSlice) {.length = length, .chars = &text->chars[start], .baseChars = text->chars}, config, context->measureTextUserData);
@@ -1673,8 +1675,7 @@ Clay__MeasureTextCacheItem *Clay__MeasureTextCached(Clay_String *text, Clay_Text
             measured->minWidth = CLAY__MAX(dimensions.width, measured->minWidth);
             measuredHeight = CLAY__MAX(measuredHeight, dimensions.height);
             if (current == ' ') {
-                dimensions.width += spaceWidth;
-                previousWord = Clay__AddMeasuredWord(CLAY__INIT(Clay__MeasuredWord) { .startOffset = start, .length = length + 1, .width = dimensions.width, .next = -1 }, previousWord);
+                previousWord = Clay__AddMeasuredWord(CLAY__INIT(Clay__MeasuredWord) { .startOffset = start, .length = length, .width = dimensions.width, .next = -1 }, previousWord);
                 lineWidth += dimensions.width;
             }
             if (current == '\n') {
@@ -2058,7 +2059,7 @@ void Clay__OpenTextElement(Clay_String text, Clay_TextElementConfig *textConfig)
     Clay__StringArray_Add(&context->layoutElementIdStrings, elementId.stringId);
     Clay_Dimensions textDimensions = { .width = textMeasured->unwrappedDimensions.width, .height = textConfig->lineHeight > 0 ? (float)textConfig->lineHeight : textMeasured->unwrappedDimensions.height };
     textElement->dimensions = textDimensions;
-    textElement->minDimensions = CLAY__INIT(Clay_Dimensions) { .width = textMeasured->minWidth, .height = textDimensions.height };
+    textElement->minDimensions = CLAY__INIT(Clay_Dimensions) { /*.width = textMeasured->minWidth,*/ .height = textDimensions.height };
     textElement->childrenOrTextContent.textElementData = Clay__TextElementDataArray_Add(&context->textElementData, CLAY__INIT(Clay__TextElementData) { .text = text, .preferredDimensions = textMeasured->unwrappedDimensions, .elementIndex = context->layoutElements.length - 1 });
     textElement->elementConfigs = CLAY__INIT(Clay__ElementConfigArraySlice) {
             .length = 1,
@@ -2549,37 +2550,44 @@ void Clay__CalculateFinalLayout(void) {
             textElementData->wrappedLines.length++;
             continue;
         }
-        float spaceWidth = Clay__MeasureText(CLAY__INIT(Clay_StringSlice) { .length = 1, .chars = CLAY__SPACECHAR.chars, .baseChars = CLAY__SPACECHAR.chars }, textConfig, context->measureTextUserData).width;
         int32_t wordIndex = measureTextCacheItem->measuredWordsStartIndex;
         while (wordIndex != -1) {
             if (context->wrappedTextLines.length > context->wrappedTextLines.capacity - 1) {
                 break;
             }
             Clay__MeasuredWord *measuredWord = Clay__MeasuredWordArray_Get(&context->measuredWords, wordIndex);
-            // Only word on the line is too large, just render it anyway
-            if (lineLengthChars == 0 && lineWidth + measuredWord->width > containerElement->dimensions.width) {
-                Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { measuredWord->width, lineHeight }, { .length = measuredWord->length, .chars = &textElementData->text.chars[measuredWord->startOffset] } });
+            int32_t wordLength = measuredWord->length;
+            int32_t wordOffset = measuredWord->startOffset;
+            float wordWidth = measuredWord->width;
+            // A word is too large, break it
+            while (wordLength > 0 && wordWidth > containerElement->dimensions.width) {
+                float spaceLeft = containerElement->dimensions.width - lineWidth;
+                int32_t brokenLength = Clay__BreakWord(CLAY__INIT(Clay_StringSlice) { .length = wordLength, .chars = &textElementData->text.chars[wordOffset], .baseChars = textElementData->text.chars }, &spaceLeft, textConfig, context->breakWordUserData);
+                if (brokenLength <= 0) brokenLength = brokenLength || lineLengthChars ? -brokenLength : 1;
+                Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { lineWidth + spaceLeft, lineHeight }, { .length = lineLengthChars + brokenLength, .chars = &textElementData->text.chars[lineStartOffset] } });
                 textElementData->wrappedLines.length++;
-                wordIndex = measuredWord->next;
-                lineStartOffset = measuredWord->startOffset + measuredWord->length;
+                lineWidth = 0;
+                lineLengthChars = 0;
+                lineStartOffset = wordOffset += brokenLength;
+                wordLength -= brokenLength;
+                wordWidth -= spaceLeft;
             }
             // measuredWord->length == 0 means a newline character
-            else if (measuredWord->length == 0 || lineWidth + measuredWord->width > containerElement->dimensions.width) {
+            if (measuredWord->length == 0 || lineWidth + wordWidth > containerElement->dimensions.width) {
                 // Wrapped text lines list has overflowed, just render out the line
-                bool finalCharIsSpace = measuredWord->length != 0 && textElementData->text.chars[CLAY__MAX(lineStartOffset + lineLengthChars - 1, 0)] == ' ';
-                Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { lineWidth + (finalCharIsSpace ? -spaceWidth : 0), lineHeight }, { .length = lineLengthChars + (finalCharIsSpace ? -1 : 0), .chars = &textElementData->text.chars[lineStartOffset] } });
+                Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { lineWidth, lineHeight }, { .length = lineLengthChars + !measuredWord->length, .chars = &textElementData->text.chars[lineStartOffset] } });
                 textElementData->wrappedLines.length++;
                 if (lineLengthChars == 0 || measuredWord->length == 0) {
                     wordIndex = measuredWord->next;
                 }
                 lineWidth = 0;
                 lineLengthChars = 0;
-                lineStartOffset = measuredWord->startOffset;
-            } else {
-                lineWidth += measuredWord->width + textConfig->letterSpacing;
-                lineLengthChars += measuredWord->length;
-                wordIndex = measuredWord->next;
+                lineStartOffset = wordOffset;
             }
+
+            lineWidth += wordWidth + textConfig->letterSpacing;
+            lineLengthChars += wordLength;
+            wordIndex = measuredWord->next;
         }
         if (lineLengthChars > 0) {
             Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { lineWidth - textConfig->letterSpacing, lineHeight }, {.length = lineLengthChars, .chars = &textElementData->text.chars[lineStartOffset] } });
@@ -3953,6 +3961,11 @@ void Clay_SetMeasureTextFunction(Clay_Dimensions (*measureTextFunction)(Clay_Str
     Clay_Context* context = Clay_GetCurrentContext();
     Clay__MeasureText = measureTextFunction;
     context->measureTextUserData = userData;
+}
+void Clay_SetBreakWordFunction(int32_t (*breakWordFunction)(Clay_StringSlice text, float *width, Clay_TextElementConfig *config, void *userData), void *userData) {
+    Clay_Context* context = Clay_GetCurrentContext();
+    Clay__BreakWord = breakWordFunction;
+    context->breakWordUserData = userData;
 }
 void Clay_SetQueryScrollOffsetFunction(Clay_Vector2 (*queryScrollOffsetFunction)(uint32_t elementId, void *userData), void *userData) {
     Clay_Context* context = Clay_GetCurrentContext();
