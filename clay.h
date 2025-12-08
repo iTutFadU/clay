@@ -2577,9 +2577,6 @@ void Clay__CalculateFinalLayout(void) {
                 // Wrapped text lines list has overflowed, just render out the line
                 Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { lineWidth, lineHeight }, { .length = lineLengthChars + !measuredWord->length, .chars = &textElementData->text.chars[lineStartOffset] } });
                 textElementData->wrappedLines.length++;
-                if (lineLengthChars == 0 || measuredWord->length == 0) {
-                    wordIndex = measuredWord->next;
-                }
                 lineWidth = 0;
                 lineLengthChars = 0;
                 lineStartOffset = wordOffset;
@@ -2589,10 +2586,8 @@ void Clay__CalculateFinalLayout(void) {
             lineLengthChars += wordLength;
             wordIndex = measuredWord->next;
         }
-        if (lineLengthChars > 0) {
-            Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { lineWidth - textConfig->letterSpacing, lineHeight }, {.length = lineLengthChars, .chars = &textElementData->text.chars[lineStartOffset] } });
-            textElementData->wrappedLines.length++;
-        }
+        Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { lineWidth - textConfig->letterSpacing, lineHeight }, {.length = lineLengthChars, .chars = &textElementData->text.chars[lineStartOffset] } });
+        textElementData->wrappedLines.length++;
         containerElement->dimensions.height = lineHeight * (float)textElementData->wrappedLines.length;
     }
 
@@ -2893,10 +2888,6 @@ void Clay__CalculateFinalLayout(void) {
                             float yPosition = lineHeightOffset;
                             for (int32_t lineIndex = 0; lineIndex < currentElement->childrenOrTextContent.textElementData->wrappedLines.length; ++lineIndex) {
                                 Clay__WrappedTextLine *wrappedLine = Clay__WrappedTextLineArraySlice_Get(&currentElement->childrenOrTextContent.textElementData->wrappedLines, lineIndex);
-                                if (wrappedLine->line.length == 0) {
-                                    yPosition += finalLineHeight;
-                                    continue;
-                                }
                                 float offset = (currentElementBoundingBox.width - wrappedLine->dimensions.width);
                                 if (textElementConfig->textAlignment == CLAY_TEXT_ALIGN_LEFT) {
                                     offset = 0;
